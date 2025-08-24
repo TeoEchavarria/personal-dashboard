@@ -1,0 +1,65 @@
+# Personal Dashboard Configuration
+
+# Application Settings
+app:
+  name: "Personal Dashboard"
+  version: "1.0.0"
+  debug: false
+  port: 8501
+
+# Data Sources Configuration
+data_sources:
+  csv:
+    enabled: true
+    data_directory: "data/"
+    supported_formats: ["csv", "xlsx", "json"]
+  
+  api:
+    enabled: true
+    timeout: 30
+    retry_attempts: 3
+  
+  database:
+    enabled: false
+    connection_string: ""
+    pool_size: 5
+
+# Processing Settings
+processing:
+  batch_size: 1000
+  max_workers: 4
+  cache_enabled: true
+  cache_ttl: 3600  # seconds
+
+# Analytics Settings
+analytics:
+  default_date_range_days: 30
+  outlier_detection_method: "iqr"
+  trend_analysis_window: 7
+  correlation_threshold: 0.7
+
+# UI Settings
+ui:
+  theme: "light"
+  sidebar_state: "expanded"
+  page_title: "Personal Dashboard"
+  page_icon: "📊"
+  
+  charts:
+    default_height: 400
+    color_palette: "viridis"
+    responsive: true
+
+# Logging Configuration
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file: "logs/dashboard.log"
+  max_size: "10MB"
+  backup_count: 5
+
+# Security Settings
+security:
+  enable_authentication: false
+  session_timeout: 3600
+  allowed_origins: ["*"]
