@@ -13,6 +13,11 @@ data_sources:
     enabled: true
     data_directory: "data/"
     supported_formats: ["csv", "xlsx", "json"]
+
+# Data Storage Configuration
+data_storage:
+  directory: "data/"
+  state_directory: "state/"
   
   api:
     enabled: true
@@ -23,6 +28,54 @@ data_sources:
     enabled: false
     connection_string: ""
     pool_size: 5
+
+# Health Connect Gateway Configuration
+health_connect:
+  base_url: "https://api.hcgateway.shuchir.dev"
+  username: ""
+  password: ""
+  tick_seconds: 180
+  methods_mode: "CORE"  # CORE or ALL
+  core_methods:
+    - "steps"
+    - "heartRate"
+    - "sleepSession"
+    - "distance"
+    - "totalCaloriesBurned"
+  all_methods:
+    - "activeCaloriesBurned"
+    - "basalBodyTemperature"
+    - "basalMetabolicRate"
+    - "bloodGlucose"
+    - "bloodPressure"
+    - "bodyFat"
+    - "bodyTemperature"
+    - "boneMass"
+    - "cervicalMucus"
+    - "distance"
+    - "exerciseSession"
+    - "elevationGained"
+    - "floorsClimbed"
+    - "heartRate"
+    - "height"
+    - "hydration"
+    - "leanBodyMass"
+    - "menstruationFlow"
+    - "menstruationPeriod"
+    - "nutrition"
+    - "ovulationTest"
+    - "oxygenSaturation"
+    - "power"
+    - "respiratoryRate"
+    - "restingHeartRate"
+    - "sleepSession"
+    - "speed"
+    - "steps"
+    - "stepsCadence"
+    - "totalCaloriesBurned"
+    - "vo2Max"
+    - "weight"
+    - "wheelchairPushes"
 
 # Processing Settings
 processing:

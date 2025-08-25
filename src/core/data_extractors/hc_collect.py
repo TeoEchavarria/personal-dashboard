@@ -4,34 +4,73 @@ from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, List, Tuple
 import requests
 from tenacity import retry, wait_exponential, stop_after_attempt
-from dotenv import load_dotenv
 import pandas as pd
 
-load_dotenv()
+# Import configuration from centralized config module
+from ..utils.config import config
 
-BASE_URL   = os.getenv("HCG_BASE_URL", "https://api.hcgateway.shuchir.dev").rstrip("/")
-USERNAME   = os.getenv("HCG_USERNAME")
-PASSWORD   = os.getenv("HCG_PASSWORD")
-TICK_SEC   = int(os.getenv("TICK_SECONDS", "180"))
-METHODS_MODE = os.getenv("METHODS", "CORE").upper()
+# Load configuration
+hcg_config = config.get_hcg_config()
+data_config = config.get_data_config()
+api_config = config.get_api_config()
 
-CORE_METHODS = ["steps", "heartRate", "sleepSession", "distance", "totalCaloriesBurned"]
-ALL_METHODS = [
-  "activeCaloriesBurned","basalBodyTemperature","basalMetabolicRate","bloodGlucose","bloodPressure",
-  "bodyFat","bodyTemperature","boneMass","cervicalMucus","distance","exerciseSession","elevationGained",
-  "floorsClimbed","heartRate","height","hydration","leanBodyMass","menstruationFlow","menstruationPeriod",
-  "nutrition","ovulationTest","oxygenSaturation","power","respiratoryRate","restingHeartRate","sleepSession",
-  "speed","steps","stepsCadence","totalCaloriesBurned","vo2Max","weight","wheelchairPushes"
-]
-METHODS = ALL_METHODS if METHODS_MODE == "ALL" else CORE_METHODS
+BASE_URL = hcg_config['base_url']
+USERNAME = hcg_config['username']
+PASSWORD = hcg_config['password']
+TICK_SEC = hcg_config['tick_seconds']
+METHODS_MODE = hcg_config['methods_mode']
 
-DATA_DIR  = "data"
-STATE_DIR = "state"
+# Get methods from configuration
+CORE_METHODS = config.get_hcg_core_methods()
+ALL_METHODS = config.get_hcg_all_methods()
+METHODS = config.get_hcg_methods()
+
+DATA_DIR = data_config['directory']
+STATE_DIR = data_config['state_directory']
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(STATE_DIR, exist_ok=True)
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+def parse_iso_datetime(iso_string: str) -> datetime:
+    """
+    Parse ISO datetime string and ensure it's timezone-aware (UTC).
+    
+    Args:
+        iso_string: ISO format datetime string
+        
+    Returns:
+        Timezone-aware datetime object in UTC
+    """
+    if not iso_string:
+        raise ValueError("Empty datetime string")
+    
+    # Handle Z suffix (Zulu time = UTC)
+    if iso_string.endswith('Z'):
+        dt = datetime.fromisoformat(iso_string.replace("Z", "+00:00"))
+    else:
+        dt = datetime.fromisoformat(iso_string)
+    
+    # Ensure timezone-aware (assume UTC if naive)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    
+    return dt
+
+def ensure_utc_aware(dt: datetime) -> datetime:
+    """
+    Ensure a datetime object is timezone-aware (UTC).
+    
+    Args:
+        dt: datetime object
+        
+    Returns:
+        Timezone-aware datetime in UTC
+    """
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
 
 def load_state(method: str) -> Dict[str, Any]:
     path = os.path.join(STATE_DIR, f"{method}.json")
@@ -39,11 +78,36 @@ def load_state(method: str) -> Dict[str, Any]:
         # Por defecto: traer últimas 24h si no hay estado previo
         since = (datetime.now(timezone.utc) - timedelta(hours=24)).replace(microsecond=0).isoformat()
         return {"last_since": since, "seen_ids": []}
+    
     with open(path, "r") as f:
-        return json.load(f)
+        state = json.load(f)
+        
+    # Validate and fix the last_since format if needed
+    if "last_since" in state and state["last_since"]:
+        try:
+            # Try to parse and reformat to ensure consistency
+            dt = parse_iso_datetime(state["last_since"])
+            state["last_since"] = dt.isoformat()
+        except Exception as e:
+            print(f"Warning: Invalid last_since format for {method}: {state['last_since']}")
+            # Reset to 24h ago if invalid
+            since = (datetime.now(timezone.utc) - timedelta(hours=24)).replace(microsecond=0).isoformat()
+            state["last_since"] = since
+    
+    return state
 
 def save_state(method: str, state: Dict[str, Any]) -> None:
     path = os.path.join(STATE_DIR, f"{method}.json")
+    
+    # Ensure last_since is in proper format before saving
+    if "last_since" in state and state["last_since"]:
+        try:
+            # Parse and reformat to ensure consistency
+            dt = parse_iso_datetime(state["last_since"])
+            state["last_since"] = dt.isoformat()
+        except Exception as e:
+            print(f"Warning: Could not normalize last_since for {method}: {state['last_since']}")
+    
     with open(path, "w") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
 
@@ -51,11 +115,13 @@ class TokenBundle:
     def __init__(self, token: str, refresh: str, expiry: str):
         self.token = token
         self.refresh = refresh
-        # expiry ISO -> datetime
-        self.expiry_dt = datetime.fromisoformat(expiry.replace("Z", "+00:00"))
+        # Parse expiry ISO string and ensure it's timezone-aware
+        self.expiry_dt = parse_iso_datetime(expiry)
 
     def is_expiring(self, buffer_minutes: int = 5) -> bool:
-        return datetime.now(timezone.utc) + timedelta(minutes=buffer_minutes) >= self.expiry_dt
+        # Both datetimes are now guaranteed to be timezone-aware
+        now_utc = datetime.now(timezone.utc)
+        return now_utc + timedelta(minutes=buffer_minutes) >= self.expiry_dt
 
 def login(username: str, password: str) -> TokenBundle:
     """
@@ -63,7 +129,7 @@ def login(username: str, password: str) -> TokenBundle:
     POST /api/v2/login
     """
     url = f"{BASE_URL}/api/v2/login"
-    r = requests.post(url, json={"username": username, "password": password}, timeout=30)
+    r = requests.post(url, json={"username": username, "password": password}, timeout=api_config['timeout'])
     r.raise_for_status()
     data = r.json()
     return TokenBundle(data["token"], data["refresh"], data["expiry"])
@@ -74,7 +140,7 @@ def refresh_token(refresh: str) -> TokenBundle:
     POST /api/v2/refresh
     """
     url = f"{BASE_URL}/api/v2/refresh"
-    r = requests.post(url, json={"refresh": refresh}, timeout=30)
+    r = requests.post(url, json={"refresh": refresh}, timeout=api_config['timeout'])
     r.raise_for_status()
     data = r.json()
     return TokenBundle(data["token"], data["refresh"], data["expiry"])
@@ -99,7 +165,7 @@ def fetch_method(method: str, bearer: str, queries: Dict[str, Any]) -> List[Dict
     """
     url = f"{BASE_URL}/api/v2/fetch/{method}"
     headers = {"Authorization": f"Bearer {bearer}", "Content-Type": "application/json"}
-    r = requests.post(url, headers=headers, json={"queries": queries}, timeout=60)
+    r = requests.post(url, headers=headers, json={"queries": queries}, timeout=api_config['timeout'] * 2)
     if r.status_code == 401:
         # Que falle para que el @retry no haga busy loop; el caller manejará refresh
         raise requests.HTTPError("401 Unauthorized", response=r)
@@ -182,23 +248,122 @@ def collect_once(tm: TokenManager, method: str) -> Tuple[int, str]:
     else:
         return (0, since)
 
-def main():
-    if not USERNAME or not PASSWORD:
-        raise SystemExit("Configura HCG_USERNAME y HCG_PASSWORD en .env")
-    tm = TokenManager(USERNAME, PASSWORD)
-    print(f"[{utc_now_iso()}] Iniciando collector. Métodos: {METHODS_MODE} ({len(METHODS)})")
-    while True:
-        cycle_start = utc_now_iso()
-        total = 0
-        for m in METHODS:
-            try:
-                n, new_since = collect_once(tm, m)
-                total += n
-                print(f"[{cycle_start}] {m:<20} +{n} (since={new_since})")
-            except Exception as e:
-                print(f"[{cycle_start}] {m:<20} ERROR: {e}")
-        # Espera al próximo tick
-        time.sleep(TICK_SEC)
+def initialize_token_manager() -> TokenManager:
+    """Initialize and return a TokenManager instance."""
+    if not config.validate_hcg_config():
+        raise ValueError("Configura HCG_USERNAME y HCG_PASSWORD en .env")
+    return TokenManager(USERNAME, PASSWORD)
 
-if __name__ == "__main__":
-    main()
+def collect_method_data(method: str, tm: TokenManager = None) -> Tuple[int, str, str]:
+    """
+    Collect data for a single method.
+    
+    Args:
+        method: Health Connect method name
+        tm: TokenManager instance (will create new if None)
+    
+    Returns:
+        Tuple of (new_records_count, new_last_since, error_message)
+    """
+    if tm is None:
+        tm = initialize_token_manager()
+    
+    try:
+        n, new_since = collect_once(tm, method)
+        return n, new_since, ""
+    except Exception as e:
+        return 0, "", str(e)
+
+def collect_all_methods_data(tm: TokenManager = None) -> Dict[str, Tuple[int, str, str]]:
+    """
+    Collect data for all configured methods.
+    
+    Args:
+        tm: TokenManager instance (will create new if None)
+    
+    Returns:
+        Dictionary with method names as keys and (count, since, error) as values
+    """
+    if tm is None:
+        tm = initialize_token_manager()
+    
+    results = {}
+    for method in METHODS:
+        results[method] = collect_method_data(method, tm)
+    
+    return results
+
+def get_method_raw_data(method: str, limit: int = 5) -> pd.DataFrame:
+    """
+    Get raw data for a method (first N rows from CSV).
+    
+    Args:
+        method: Health Connect method name
+        limit: Number of rows to return
+    
+    Returns:
+        DataFrame with raw data
+    """
+    csv_path = os.path.join(DATA_DIR, f"{method}.csv")
+    
+    if not os.path.exists(csv_path):
+        return pd.DataFrame()
+    
+    try:
+        df = pd.read_csv(csv_path)
+        return df.head(limit)
+    except Exception as e:
+        print(f"Error reading {method} data: {e}")
+        return pd.DataFrame()
+
+def get_method_last_update(method: str) -> str:
+    """
+    Get the last update timestamp for a method.
+    
+    Args:
+        method: Health Connect method name
+    
+    Returns:
+        Last update timestamp or "Never" if no data
+    """
+    state = load_state(method)
+    last_since = state.get("last_since", "")
+    
+    if not last_since:
+        return "Never"
+    
+    try:
+        # Use utility function to parse datetime consistently
+        dt = parse_iso_datetime(last_since)
+        return dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+    except Exception as e:
+        # If parsing fails, return the raw string with error info
+        return f"Invalid date: {last_since}"
+
+def get_all_methods_status() -> Dict[str, Dict[str, Any]]:
+    """
+    Get status information for all methods.
+    
+    Returns:
+        Dictionary with method status information
+    """
+    status = {}
+    
+    for method in METHODS:
+        csv_path = os.path.join(DATA_DIR, f"{method}.csv")
+        record_count = 0
+        
+        if os.path.exists(csv_path):
+            try:
+                df = pd.read_csv(csv_path)
+                record_count = len(df)
+            except:
+                record_count = 0
+        
+        status[method] = {
+            "last_update": get_method_last_update(method),
+            "record_count": record_count,
+            "has_data": record_count > 0
+        }
+    
+    return status
