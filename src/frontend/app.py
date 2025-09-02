@@ -67,13 +67,18 @@ def main():
         show_settings_page()
 
 def show_home_page():
-    """Display the home page."""
-    st.header("🏠 Welcome to Your Personal Dashboard")
-    
+    """Display the home page with futuristic health dashboard."""
     # Check if HCG is configured
     try:
         if config.validate_hcg_config():
-            show_hcg_summary()
+            # Import and render the futuristic health dashboard
+            try:
+                from components.health_dashboard import render_futuristic_health_dashboard
+                render_futuristic_health_dashboard()
+            except Exception as e:
+                st.error(f"Error loading health dashboard: {e}")
+                st.info("Falling back to basic summary...")
+                show_hcg_summary()
         else:
             st.warning("⚠️ Health Connect Gateway not configured. Please set up your .env file.")
             st.info("Go to the Data Sources page to configure your connection.")
