@@ -71,10 +71,10 @@ def show_home_page():
     # Check if HCG is configured
     try:
         if config.validate_hcg_config():
-            # Import and render the futuristic health dashboard
+            # Import and render the minimal health dashboard
             try:
-                from components.health_dashboard import render_futuristic_health_dashboard
-                render_futuristic_health_dashboard()
+                from components.health_dashboard import render_minimal_health_dashboard
+                render_minimal_health_dashboard()
             except Exception as e:
                 st.error(f"Error loading health dashboard: {e}")
                 st.info("Falling back to basic summary...")
