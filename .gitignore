@@ -190,3 +190,6 @@ logs/
 # Temporary files
 *.tmp
 *.temp
+
+
+state/

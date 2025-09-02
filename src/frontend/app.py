@@ -178,12 +178,51 @@ def show_data_sources_page():
     st.info(f"📡 Connected to: {hcg_config['base_url']}")
     st.info(f"🔄 Methods mode: {hcg_config['methods_mode']} ({len(METHODS)} methods)")
     
+    # Date range selector
+    st.subheader("📅 Date Range Selection")
+    col1, col2, col3 = st.columns([2, 2, 2])
+    
+    with col1:
+        use_date_range = st.checkbox("Use specific date range", 
+                                   help="If unchecked, will use incremental updates from last sync")
+    
+    start_date = None
+    end_date = None
+    
+    if use_date_range:
+        with col2:
+            start_date_input = st.date_input(
+                "Start Date",
+                value=datetime.now().date() - pd.Timedelta(days=7),
+                help="Start date for data collection"
+            )
+            start_date = f"{start_date_input}T00:00:00Z"
+        
+        with col3:
+            end_date_input = st.date_input(
+                "End Date", 
+                value=datetime.now().date(),
+                help="End date for data collection"
+            )
+            end_date = f"{end_date_input}T23:59:59Z"
+        
+        # Validate date range
+        if start_date_input > end_date_input:
+            st.error("❌ Start date must be before end date")
+            return
+        
+        # Show selected range
+        days_diff = (end_date_input - start_date_input).days + 1
+        st.info(f"📊 Selected range: {days_diff} day(s) from {start_date_input} to {end_date_input}")
+    
+    st.markdown("---")
+    
     # Update buttons
     col1, col2, col3 = st.columns([2, 2, 1])
     
     with col1:
         if st.button("🔄 Update All Methods", type="primary"):
-            update_all_methods()
+            update_all_methods(start_date, end_date)
     
     with col2:
         if st.button("📊 Refresh Status"):
@@ -204,7 +243,7 @@ def show_data_sources_page():
             tab1, tab2 = st.tabs(["📊 Method Status", "📋 Raw Data Viewer"])
             
             with tab1:
-                show_methods_status(status_data)
+                show_methods_status(status_data, start_date, end_date)
             
             with tab2:
                 show_raw_data_viewer()
@@ -214,7 +253,7 @@ def show_data_sources_page():
     except Exception as e:
         st.error(f"Error loading data: {e}")
 
-def show_methods_status(status_data):
+def show_methods_status(status_data, start_date=None, end_date=None):
     """Display status information for all methods."""
     st.subheader("Methods Status Overview")
     
@@ -251,7 +290,7 @@ def show_methods_status(status_data):
             
             with col3:
                 if st.button(f"🔄", key=f"update_{method}"):
-                    update_single_method(method)
+                    update_single_method(method, start_date, end_date)
 
 def show_raw_data_viewer():
     """Display raw data viewer for methods."""
@@ -290,15 +329,19 @@ def show_raw_data_viewer():
         except Exception as e:
             st.error(f"Error loading data for {selected_method}: {e}")
 
-def update_single_method(method):
+def update_single_method(method, start_date=None, end_date=None):
     """Update data for a single method."""
-    with st.spinner(f"Updating {method}..."):
+    date_info = ""
+    if start_date and end_date:
+        date_info = f" (from {start_date[:10]} to {end_date[:10]})"
+    
+    with st.spinner(f"Updating {method}{date_info}..."):
         try:
             # Initialize token manager in session state to reuse
             if 'token_manager' not in st.session_state:
                 st.session_state.token_manager = initialize_token_manager()
             
-            count, since, error = collect_method_data(method, st.session_state.token_manager)
+            count, since, error = collect_method_data(method, st.session_state.token_manager, start_date=start_date, end_date=end_date)
             
             if error:
                 st.error(f"❌ Error updating {method}: {error}")
@@ -307,9 +350,9 @@ def update_single_method(method):
                     if 'token_manager' in st.session_state:
                         del st.session_state.token_manager
             else:
-                st.success(f"✅ Updated {method}: {count} new records")
+                st.success(f"✅ Updated {method}: {count} new records{date_info}")
                 if since:
-                    st.info(f"📅 Last update: {since}")
+                    st.info(f"📅 Reference date: {since}")
                 st.rerun()
                 
         except Exception as e:
@@ -318,15 +361,19 @@ def update_single_method(method):
             if 'token_manager' in st.session_state:
                 del st.session_state.token_manager
 
-def update_all_methods():
+def update_all_methods(start_date=None, end_date=None):
     """Update data for all methods."""
-    with st.spinner("Updating all methods..."):
+    date_info = ""
+    if start_date and end_date:
+        date_info = f" (from {start_date[:10]} to {end_date[:10]})"
+    
+    with st.spinner(f"Updating all methods{date_info}..."):
         try:
             # Initialize token manager in session state to reuse
             if 'token_manager' not in st.session_state:
                 st.session_state.token_manager = initialize_token_manager()
             
-            results = collect_all_methods_data(st.session_state.token_manager)
+            results = collect_all_methods_data(st.session_state.token_manager, start_date=start_date, end_date=end_date)
             
             # Display results
             success_count = 0
@@ -342,7 +389,7 @@ def update_all_methods():
                     success_count += 1
             
             if success_count > 0:
-                st.success(f"✅ Updated {success_count} methods successfully. Total new records: {total_records}")
+                st.success(f"✅ Updated {success_count} methods successfully. Total new records: {total_records}{date_info}")
             
             if error_count > 0:
                 st.warning(f"⚠️ {error_count} methods had errors")

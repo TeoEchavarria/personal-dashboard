@@ -88,7 +88,7 @@ def load_state(method: str) -> Dict[str, Any]:
             # Try to parse and reformat to ensure consistency
             dt = parse_iso_datetime(state["last_since"])
             state["last_since"] = dt.isoformat()
-        except Exception as e:
+        except Exception:
             print(f"Warning: Invalid last_since format for {method}: {state['last_since']}")
             # Reset to 24h ago if invalid
             since = (datetime.now(timezone.utc) - timedelta(hours=24)).replace(microsecond=0).isoformat()
@@ -105,7 +105,7 @@ def save_state(method: str, state: Dict[str, Any]) -> None:
             # Parse and reformat to ensure consistency
             dt = parse_iso_datetime(state["last_since"])
             state["last_since"] = dt.isoformat()
-        except Exception as e:
+        except Exception:
             print(f"Warning: Could not normalize last_since for {method}: {state['last_since']}")
     
     with open(path, "w") as f:
@@ -178,6 +178,25 @@ def build_query_since(since_iso: str) -> Dict[str, Any]:
     """
     return {"start": {"$gte": since_iso}}
 
+def build_query_date_range(start_date: str, end_date: str = None) -> Dict[str, Any]:
+    """
+    Filtra por rango de fechas.
+    
+    Args:
+        start_date: Fecha de inicio en formato ISO (ej: "2024-01-01T00:00:00Z")
+        end_date: Fecha de fin en formato ISO (opcional, si no se proporciona usa fecha actual)
+    
+    Returns:
+        Query dict con filtros de fecha
+    """
+    query = {"start": {"$gte": start_date}}
+    
+    if end_date:
+        # Si se proporciona end_date, filtramos que start sea menor o igual al end_date
+        query["start"]["$lte"] = end_date
+    
+    return query
+
 def append_csv(method: str, rows: List[Dict[str, Any]]) -> None:
     """
     Guarda incrementalmente. Estructura CSV:
@@ -208,26 +227,38 @@ def append_csv(method: str, rows: List[Dict[str, Any]]) -> None:
     else:
         df.drop_duplicates(subset=["_id"], keep="last").to_csv(csv_path, index=False)
 
-def collect_once(tm: TokenManager, method: str) -> Tuple[int, str]:
+def collect_once(tm: TokenManager, method: str, start_date: str = None, end_date: str = None) -> Tuple[int, str]:
     """
     Corre una ingesta de un método:
-    - Lee estado (last_since)
-    - Hace fetch con start >= last_since
+    - Lee estado (last_since) o usa start_date si se proporciona
+    - Hace fetch con filtros de fecha apropiados
     - Dedup y guarda CSV
-    - Actualiza estado con el max(end|start) observado
+    - Actualiza estado con el max(end|start) observado (solo si no se usan fechas específicas)
     Devuelve (nuevos_registros, nuevo_last_since)
     """
     st = load_state(method)
-    since = st.get("last_since")
+    
+    # Determinar el query a usar
+    if start_date:
+        # Si se proporciona start_date, usar query de rango
+        query = build_query_date_range(start_date, end_date)
+        since = start_date  # Para el retorno
+        update_state = False  # No actualizar estado cuando se usan fechas específicas
+    else:
+        # Comportamiento original: usar last_since del estado
+        since = st.get("last_since")
+        query = build_query_since(since)
+        update_state = True
+    
     # 1) token válido
     token = tm.ensure()
     # 2) fetch con manejo de 401 → refresh inmediato y reintento 1 vez
     try:
-        items = fetch_method(method, token, build_query_since(since))
+        items = fetch_method(method, token, query)
     except requests.HTTPError as e:
         if e.response is not None and e.response.status_code == 401:
             tm.bundle = refresh_token(tm.bundle.refresh)
-            items = fetch_method(method, tm.bundle.token, build_query_since(since))
+            items = fetch_method(method, tm.bundle.token, query)
         else:
             raise
     if not isinstance(items, list):
@@ -237,16 +268,16 @@ def collect_once(tm: TokenManager, method: str) -> Tuple[int, str]:
         return x.get("end") or x.get("start") or "1970-01-01T00:00:00Z"
     items.sort(key=end_or_start_iso)
     # 4) guarda CSV incremental con dedup
-    before = 0
     append_csv(method, items)
-    # 5) actualiza last_since al máximo (end|start)
-    if items:
+    # 5) actualiza last_since al máximo (end|start) solo si no se usan fechas específicas
+    if items and update_state:
         new_since = end_or_start_iso(items[-1])
         st["last_since"] = new_since
         save_state(method, st)
         return (len(items), new_since)
     else:
-        return (0, since)
+        # Si se usan fechas específicas o no hay items, retornar el since original
+        return (len(items), since)
 
 def initialize_token_manager() -> TokenManager:
     """Initialize and return a TokenManager instance."""
@@ -254,13 +285,15 @@ def initialize_token_manager() -> TokenManager:
         raise ValueError("Configura HCG_USERNAME y HCG_PASSWORD en .env")
     return TokenManager(USERNAME, PASSWORD)
 
-def collect_method_data(method: str, tm: TokenManager = None) -> Tuple[int, str, str]:
+def collect_method_data(method: str, tm: TokenManager = None, start_date: str = None, end_date: str = None) -> Tuple[int, str, str]:
     """
     Collect data for a single method.
     
     Args:
         method: Health Connect method name
         tm: TokenManager instance (will create new if None)
+        start_date: Start date for data collection (ISO format, optional)
+        end_date: End date for data collection (ISO format, optional)
     
     Returns:
         Tuple of (new_records_count, new_last_since, error_message)
@@ -269,17 +302,19 @@ def collect_method_data(method: str, tm: TokenManager = None) -> Tuple[int, str,
         tm = initialize_token_manager()
     
     try:
-        n, new_since = collect_once(tm, method)
+        n, new_since = collect_once(tm, method, start_date, end_date)
         return n, new_since, ""
     except Exception as e:
         return 0, "", str(e)
 
-def collect_all_methods_data(tm: TokenManager = None) -> Dict[str, Tuple[int, str, str]]:
+def collect_all_methods_data(tm: TokenManager = None, start_date: str = None, end_date: str = None) -> Dict[str, Tuple[int, str, str]]:
     """
     Collect data for all configured methods.
     
     Args:
         tm: TokenManager instance (will create new if None)
+        start_date: Start date for data collection (ISO format, optional)
+        end_date: End date for data collection (ISO format, optional)
     
     Returns:
         Dictionary with method names as keys and (count, since, error) as values
@@ -289,7 +324,7 @@ def collect_all_methods_data(tm: TokenManager = None) -> Dict[str, Tuple[int, st
     
     results = {}
     for method in METHODS:
-        results[method] = collect_method_data(method, tm)
+        results[method] = collect_method_data(method, tm, start_date, end_date)
     
     return results
 
@@ -357,7 +392,7 @@ def get_all_methods_status() -> Dict[str, Dict[str, Any]]:
             try:
                 df = pd.read_csv(csv_path)
                 record_count = len(df)
-            except:
+            except Exception:
                 record_count = 0
         
         status[method] = {
